@@ -1,4 +1,3 @@
-```markdown
 # 🛡️ Zero-Touch Server Hardening
 
 **Automatización de seguridad para Linux y Windows**  
