@@ -1,0 +1,333 @@
+# =================================================================
+# Vagrantfile - Fortress Hardening Lab (Windows)
+# Autor: Alejandro González Santana
+# Descripción: Entorno de pruebas aislado para fortress_hardening.ps1
+#              Ejecuta el hardening y valida los resultados automáticamente.
+#
+# REQUISITOS:
+#   - Vagrant >= 2.3
+#   - VirtualBox >= 6.1
+#   - Box: gusztavvargadr/windows-server-2019-standard (gratuita, ~7 GB)
+#     Descarga automática en el primer `vagrant up`
+#
+# Uso:
+#   vagrant up              → levanta la VM, aplica hardening y ejecuta tests
+#   vagrant up --provision  → re-ejecuta provisión en VM existente
+#   vagrant rdp             → abre RDP para inspección manual (si tienes cliente RDP)
+#   vagrant destroy -f      → elimina la VM completamente
+# =================================================================
+
+Vagrant.configure("2") do |config|
+
+  # ── Box base: Windows Server 2019 ───────────────────────────────
+  # Box pública, mantenida por la comunidad Vagrant.
+  # Alternativa más ligera: "StefanScherer/windows_2019" (~6 GB)
+  config.vm.box              = "gusztavvargadr/windows-server-2019-standard"
+  config.vm.hostname         = "fortress-win-lab"
+  config.vm.guest            = :windows
+  config.vm.communicator     = "winrm"
+
+  # WinRM: protocolo de comunicación remota de Windows (equivalente a SSH)
+  config.winrm.username      = "vagrant"
+  config.winrm.password      = "vagrant"
+  config.winrm.transport     = :negotiate
+  config.winrm.timeout       = 300
+  config.winrm.retry_limit   = 20
+
+  # ── Recursos ────────────────────────────────────────────────────
+  config.vm.provider "virtualbox" do |vb|
+    vb.memory  = "4096"    # Windows necesita más RAM que Linux
+    vb.cpus    = 2
+    vb.name    = "Fortress_Hardening_Win_Lab"
+    vb.gui     = false     # Cambiar a true para ver el escritorio durante las pruebas
+    vb.customize ["modifyvm", :id, "--audio",   "none"]
+    vb.customize ["modifyvm", :id, "--usb",     "off"]
+    vb.customize ["modifyvm", :id, "--clipboard", "disabled"]
+  end
+
+  # ── Carpeta compartida ───────────────────────────────────────────
+  # Monta la carpeta actual en C:\vagrant dentro de la VM.
+  # Copia fortress_hardening.ps1 en la misma carpeta que este Vagrantfile.
+  config.vm.synced_folder ".", "/vagrant"
+
+  # ── Paso 1: Verificar y preparar el entorno ──────────────────────
+  config.vm.provision "shell", name: "01-prepare", privileged: true,
+    powershell_elevated_interactive: false,
+    inline: <<-POWERSHELL
+      Write-Host ""
+      Write-Host "=================================================" -ForegroundColor Cyan
+      Write-Host " FORTRESS HARDENING LAB - Preparacion (Windows)" -ForegroundColor Cyan
+      Write-Host "=================================================" -ForegroundColor Cyan
+
+      # Verificar que el script existe
+      if (-not (Test-Path "C:\\vagrant\\fortress_hardening.ps1")) {
+          Write-Host "[ERROR] No se encontro C:\\vagrant\\fortress_hardening.ps1" -ForegroundColor Red
+          Write-Host "        Copia el script a la misma carpeta que este Vagrantfile." -ForegroundColor Red
+          exit 1
+      }
+
+      # Permitir ejecución de scripts PowerShell en esta sesión
+      Set-ExecutionPolicy Bypass -Scope LocalMachine -Force
+      Write-Host "[OK] ExecutionPolicy configurada a Bypass para pruebas." -ForegroundColor Green
+
+      # Mostrar info del sistema
+      $os = Get-CimInstance Win32_OperatingSystem
+      Write-Host "[*] Sistema: $($os.Caption) - Build $($os.BuildNumber)" -ForegroundColor Yellow
+      Write-Host "[*] RAM disponible: $([math]::Round($os.FreePhysicalMemory/1MB, 2)) GB" -ForegroundColor Yellow
+      Write-Host "[OK] Entorno listo." -ForegroundColor Green
+    POWERSHELL
+
+  # ── Paso 2: Ejecutar el hardening ───────────────────────────────
+  config.vm.provision "shell", name: "02-hardening", privileged: true,
+    powershell_elevated_interactive: false,
+    inline: <<-POWERSHELL
+      Write-Host ""
+      Write-Host "=================================================" -ForegroundColor Cyan
+      Write-Host " FORTRESS HARDENING LAB - Aplicando hardening..." -ForegroundColor Cyan
+      Write-Host "=================================================" -ForegroundColor Cyan
+
+      try {
+          & "C:\\vagrant\\fortress_hardening.ps1"
+          Write-Host "[OK] Script de hardening finalizado." -ForegroundColor Green
+      } catch {
+          Write-Host "[ERROR] El script de hardening fallo: $_" -ForegroundColor Red
+          exit 1
+      }
+    POWERSHELL
+
+  # ── Paso 3: Tests automatizados ─────────────────────────────────
+  config.vm.provision "shell", name: "03-tests", privileged: true,
+    powershell_elevated_interactive: false,
+    inline: <<-'POWERSHELL'
+      $PASS = 0
+      $FAIL = 0
+      $WARN = 0
+
+      function pass($msg) { Write-Host "  [PASS] $msg" -ForegroundColor Green;  $script:PASS++ }
+      function fail($msg) { Write-Host "  [FAIL] $msg" -ForegroundColor Red;    $script:FAIL++ }
+      function warn($msg) { Write-Host "  [WARN] $msg" -ForegroundColor Yellow; $script:WARN++ }
+      function section($title) {
+          Write-Host ""
+          Write-Host "▶ $title" -ForegroundColor Cyan
+          Write-Host "  ──────────────────────────────────────────────"
+      }
+
+      Write-Host ""
+      Write-Host "=================================================" -ForegroundColor Cyan
+      Write-Host " FORTRESS HARDENING LAB - Suite de tests"        -ForegroundColor Cyan
+      Write-Host "=================================================" -ForegroundColor Cyan
+
+      # ── TEST 1: Firewall ─────────────────────────────────────────
+      section "Firewall de Windows"
+      $profiles = Get-NetFirewallProfile -Profile Domain,Public,Private
+      foreach ($p in $profiles) {
+          if ($p.DefaultInboundAction -eq "Block") {
+              pass "Perfil $($p.Name): DefaultInboundAction = Block"
+          } else {
+              fail "Perfil $($p.Name): DefaultInboundAction = $($p.DefaultInboundAction) (esperado: Block)"
+          }
+      }
+      $rdpRule = Get-NetFirewallRule -DisplayName "Allow RDP" -ErrorAction SilentlyContinue
+      if ($rdpRule) { pass "Regla 'Allow RDP' existe" } else { fail "Regla 'Allow RDP' NO encontrada" }
+
+      $httpRule = Get-NetFirewallRule -DisplayName "Allow HTTP" -ErrorAction SilentlyContinue
+      if ($httpRule) { pass "Regla 'Allow HTTP' existe" } else { fail "Regla 'Allow HTTP' NO encontrada" }
+
+      $httpsRule = Get-NetFirewallRule -DisplayName "Allow HTTPS" -ErrorAction SilentlyContinue
+      if ($httpsRule) { pass "Regla 'Allow HTTPS' existe" } else { fail "Regla 'Allow HTTPS' NO encontrada" }
+
+      $smbRule = Get-NetFirewallRule -DisplayName "File and Printer Sharing (SMB-In)" -ErrorAction SilentlyContinue
+      if ($smbRule -and $smbRule.Enabled -eq $false) {
+          pass "Regla SMB-In deshabilitada"
+      } elseif (-not $smbRule) {
+          warn "Regla SMB-In no encontrada (puede que no exista en esta versión)"
+      } else {
+          fail "Regla SMB-In AÚN habilitada"
+      }
+
+      # ── TEST 2: RDP con NLA ──────────────────────────────────────
+      section "Hardening de RDP"
+      $nla = Get-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" `
+             -Name "UserAuthentication" -ErrorAction SilentlyContinue
+      if ($nla.UserAuthentication -eq 1) {
+          pass "NLA (Network Level Authentication) activada"
+      } else {
+          fail "NLA NO activada"
+      }
+
+      # ── TEST 3: Política de bloqueo de cuentas ───────────────────
+      section "Politica de bloqueo de cuentas"
+      $lockout = net accounts 2>$null
+      if ($lockout -match "Lockout threshold:\s+5") {
+          pass "Lockout threshold = 5"
+      } else {
+          $threshold = ($lockout | Select-String "Lockout threshold").ToString().Trim()
+          fail "Lockout threshold incorrecto: $threshold"
+      }
+      if ($lockout -match "Lockout duration \(minutes\):\s+30") {
+          pass "Lockout duration = 30 min"
+      } else {
+          warn "Lockout duration no confirmada (puede variar el formato)"
+      }
+
+      # ── TEST 4: Windows Defender ─────────────────────────────────
+      section "Windows Defender"
+      $mpPref = Get-MpPreference -ErrorAction SilentlyContinue
+      if ($mpPref -and $mpPref.DisableRealtimeMonitoring -eq $false) {
+          pass "Proteccion en tiempo real activa"
+      } else {
+          fail "Proteccion en tiempo real DESACTIVADA"
+      }
+      $scanTask = Get-ScheduledTask -TaskName "Windows Defender Daily Quick Scan" -ErrorAction SilentlyContinue
+      if ($scanTask) {
+          pass "Tarea de escaneo diario programada"
+      } else {
+          fail "Tarea de escaneo diario NO encontrada"
+      }
+
+      # ── TEST 5: Protocolos inseguros deshabilitados ──────────────
+      section "Protocolos inseguros"
+      $smbConfig = Get-SmbServerConfiguration -ErrorAction SilentlyContinue
+      if ($smbConfig -and $smbConfig.EnableSMB1Protocol -eq $false) {
+          pass "SMBv1 deshabilitado"
+      } else {
+          fail "SMBv1 NO deshabilitado"
+      }
+
+      $llmnr = Get-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\DNSClient" `
+               -Name "EnableMulticast" -ErrorAction SilentlyContinue
+      if ($llmnr -and $llmnr.EnableMulticast -eq 0) {
+          pass "LLMNR deshabilitado"
+      } else {
+          fail "LLMNR NO deshabilitado"
+      }
+
+      # ── TEST 6: TLS/SCHANNEL ─────────────────────────────────────
+      section "Hardening TLS/SCHANNEL"
+      $schannelBase = "HKLM:\SYSTEM\CurrentControlSet\Control\SecurityProviders\SCHANNEL\Protocols"
+
+      $disabledProtos = @("SSL 2.0", "SSL 3.0", "TLS 1.0", "TLS 1.1")
+      foreach ($proto in $disabledProtos) {
+          $path = "$schannelBase\$proto\Server"
+          $val = Get-ItemProperty -Path $path -Name "Enabled" -ErrorAction SilentlyContinue
+          if ($val -and $val.Enabled -eq 0) {
+              pass "$proto (Server) deshabilitado"
+          } else {
+              fail "$proto (Server) NO deshabilitado"
+          }
+      }
+
+      $enabledProtos = @("TLS 1.2", "TLS 1.3")
+      foreach ($proto in $enabledProtos) {
+          $path = "$schannelBase\$proto\Server"
+          $val = Get-ItemProperty -Path $path -Name "Enabled" -ErrorAction SilentlyContinue
+          if ($val -and $val.Enabled -eq 1) {
+              pass "$proto (Server) habilitado"
+          } else {
+              warn "$proto (Server) no configurado explícitamente (puede estar activo por defecto)"
+          }
+      }
+
+      $weakCiphers = @("RC4 128/128", "DES 56/56", "Triple DES 168")
+      foreach ($cipher in $weakCiphers) {
+          $path = "HKLM:\SYSTEM\CurrentControlSet\Control\SecurityProviders\SCHANNEL\Ciphers\$cipher"
+          $val = Get-ItemProperty -Path $path -Name "Enabled" -ErrorAction SilentlyContinue
+          if ($val -and $val.Enabled -eq 0) {
+              pass "Cifrado debil '$cipher' deshabilitado"
+          } else {
+              fail "Cifrado debil '$cipher' NO deshabilitado"
+          }
+      }
+
+      # ── TEST 7: Hardening de red TCP/IP ─────────────────────────
+      section "Parametros de red TCP/IP"
+      $tcpPath = "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters"
+      $tcpTests = @{
+          "SynAttackProtect"    = 1
+          "EnableICMPRedirect"  = 0
+          "DisableIPSourceRouting" = 2
+      }
+      foreach ($key in $tcpTests.Keys) {
+          $val = Get-ItemProperty -Path $tcpPath -Name $key -ErrorAction SilentlyContinue
+          if ($val -and $val.$key -eq $tcpTests[$key]) {
+              pass "$key = $($tcpTests[$key])"
+          } else {
+              fail "$key no tiene el valor esperado ($($tcpTests[$key]))"
+          }
+      }
+
+      # ── TEST 8: UAC ──────────────────────────────────────────────
+      section "UAC (Control de cuentas de usuario)"
+      $uacPath = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System"
+      $uac = Get-ItemProperty -Path $uacPath -Name "EnableLUA" -ErrorAction SilentlyContinue
+      if ($uac -and $uac.EnableLUA -eq 1) {
+          pass "UAC habilitado"
+      } else {
+          fail "UAC DESHABILITADO"
+      }
+
+      # ── TEST 9: Cuenta Administrator integrada ───────────────────
+      section "Usuarios privilegiados"
+      $adminAccount = Get-LocalUser -Name "Administrator" -ErrorAction SilentlyContinue
+      if ($adminAccount -and $adminAccount.Enabled -eq $false) {
+          pass "Cuenta Administrator integrada deshabilitada"
+      } elseif (-not $adminAccount) {
+          warn "Cuenta Administrator no encontrada (puede tener otro nombre)"
+      } else {
+          fail "Cuenta Administrator integrada AUN habilitada"
+      }
+
+      $admins = Get-LocalGroupMember -Group "Administrators" -ErrorAction SilentlyContinue
+      Write-Host "  [INFO] Administradores locales actuales:" -ForegroundColor Yellow
+      foreach ($a in $admins) {
+          Write-Host "         - $($a.Name) [$($a.PrincipalSource)]" -ForegroundColor Yellow
+      }
+
+      # ── TEST 10: Auditoría extendida ─────────────────────────────
+      section "Politicas de auditoria"
+      $auditChecks = @("Sensitive Privilege Use", "Process Creation", "Logon")
+      foreach ($cat in $auditChecks) {
+          $result = auditpol /get /subcategory:"$cat" 2>$null
+          if ($result -match "Success and Failure|Inclusion correcto") {
+              pass "Auditoria activa: $cat"
+          } else {
+              warn "Auditoria no confirmada para: $cat (puede variar el idioma del SO)"
+          }
+      }
+
+      # ── TEST 11: Log de hardening ────────────────────────────────
+      section "Trazabilidad"
+      if (Test-Path "C:\ProgramData\fortress_hardening.log") {
+          $lines = (Get-Content "C:\ProgramData\fortress_hardening.log").Count
+          pass "Log de hardening encontrado ($lines lineas)"
+      } else {
+          fail "Log de hardening NO encontrado"
+      }
+      $backups = Get-ChildItem "C:\" -Filter "HardeningBackup_*" -Directory -ErrorAction SilentlyContinue
+      if ($backups) {
+          pass "Directorio de backup creado: $($backups[-1].FullName)"
+      } else {
+          fail "Directorio de backup NO encontrado"
+      }
+
+      # ── Resumen final ────────────────────────────────────────────
+      $TOTAL = $PASS + $FAIL + $WARN
+      Write-Host ""
+      Write-Host "=================================================" -ForegroundColor Cyan
+      Write-Host " RESULTADOS FINALES   (total: $TOTAL tests)"      -ForegroundColor Cyan
+      Write-Host "=================================================" -ForegroundColor Cyan
+      Write-Host "  PASS: $PASS" -ForegroundColor Green
+      Write-Host "  FAIL: $FAIL" -ForegroundColor Red
+      Write-Host "  WARN: $WARN" -ForegroundColor Yellow
+      Write-Host "=================================================" -ForegroundColor Cyan
+
+      if ($FAIL -eq 0) {
+          Write-Host "  Hardening verificado correctamente." -ForegroundColor Green
+          exit 0
+      } else {
+          Write-Host "  Se detectaron $FAIL fallos. Revisa: C:\ProgramData\fortress_hardening.log" -ForegroundColor Red
+          exit 1
+      }
+    POWERSHELL
+
+end

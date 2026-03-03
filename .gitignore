@@ -1,0 +1,57 @@
+# =================================================================
+# .gitignore - Zero-Touch Server Hardening
+# =================================================================
+
+# ── Vagrant ───────────────────────────────────────────────────────
+# Estado interno de las máquinas virtuales (nunca se comparte)
+.vagrant/
+
+# ── Logs generados por el hardening ──────────────────────────────
+*.log
+/var/log/fortress_hardening.log
+C:/ProgramData/fortress_hardening.log
+
+# ── Backups automáticos del hardening ────────────────────────────
+# Linux: /root/hardening_backup_YYYYMMDD_HHMMSS/
+hardening_backup_*/
+# Windows: C:\HardeningBackup_YYYYMMDD_HHMMSS\
+HardeningBackup_*/
+
+# ── Archivos temporales de secedit (Windows) ─────────────────────
+*.sdb
+*.inf
+
+# ── Sistema operativo ─────────────────────────────────────────────
+# Windows
+Thumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Linux
+*~
+.nfs*
+
+# ── Editores ──────────────────────────────────────────────────────
+# VSCode
+.vscode/
+
+# JetBrains (PyCharm, IntelliJ...)
+.idea/
+*.iml
+
+# Vim / Neovim
+*.swp
+*.swo
+
+# ── Claves y secretos (nunca al repo) ────────────────────────────
+*.pem
+*.key
+*.p12
+*.pfx
+id_rsa
+id_ed25519
